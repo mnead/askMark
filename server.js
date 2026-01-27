@@ -2,34 +2,58 @@
  * Ask Mark - Brave & Boundless Chatbot Backend
  * 
  * Express server that handles Claude API calls for the Ask Mark chatbot.
- * Deploy this on your server and connect your frontend widget to it.
  */
 
 const express = require('express');
 const cors = require('cors');
 const Anthropic = require('@anthropic-ai/sdk');
-require('dotenv').config();
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
 // Initialize Anthropic client
-const anthropic = new Anthropic({
-  apiKey: process.env.ANTHROPIC_API_KEY,
-});
+let anthropic;
+try {
+  anthropic = new Anthropic({
+    apiKey: process.env.ANTHROPIC_API_KEY,
+  });
+  console.log('Anthropic client initialized');
+} catch (err) {
+  console.error('Failed to initialize Anthropic client:', err.message);
+}
 
 // Middleware
 app.use(express.json());
+
+// CORS configuration
+const allowedOrigins = process.env.ALLOWED_ORIGINS 
+  ? process.env.ALLOWED_ORIGINS.split(',') 
+  : ['http://localhost:3000'];
+
 app.use(cors({
-  origin: process.env.ALLOWED_ORIGINS?.split(',') || ['http://localhost:3000', 'https://braveandboundless.com'],
-  methods: ['POST', 'GET'],
-  credentials: true
+  origin: function(origin, callback) {
+    // Allow requests with no origin (like mobile apps or curl requests)
+    if (!origin) return callback(null, true);
+    
+    if (allowedOrigins.indexOf(origin) !== -1) {
+      callback(null, true);
+    } else {
+      console.log('CORS blocked origin:', origin);
+      callback(null, true); // Allow anyway for debugging - change to callback(new Error('Not allowed by CORS')) in production
+    }
+  },
+  methods: ['POST', 'GET', 'OPTIONS'],
+  credentials: true,
+  allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
-// Rate limiting (simple in-memory - use Redis for production)
+// Handle preflight requests
+app.options('*', cors());
+
+// Rate limiting (simple in-memory)
 const rateLimitMap = new Map();
-const RATE_LIMIT_WINDOW = 60000; // 1 minute
-const RATE_LIMIT_MAX = 10; // 10 requests per minute per IP
+const RATE_LIMIT_WINDOW = 60000;
+const RATE_LIMIT_MAX = 10;
 
 function checkRateLimit(ip) {
   const now = Date.now();
@@ -50,7 +74,7 @@ function checkRateLimit(ip) {
   return true;
 }
 
-// The complete system prompt for Ask Mark
+// System prompt
 const SYSTEM_PROMPT = `You are "Ask Mark" — an AI assistant that provides advice and guidance based on the book "Brave & Boundless" by Mark Nead. You speak in Mark's voice: bold, direct, occasionally profane (but only for impact, not casual emphasis), with cynical humor and zero tolerance for bullshit.
 
 ## YOUR VOICE
@@ -77,116 +101,62 @@ When someone asks a question:
 
 ## THE 15 BOUNDLESS RULES
 
-**PART ONE: FIRE (Origin & First Breaks)**
-
 1. **BURN THE MAP** — Stop chasing someone else's definition of success. Build your own.
-
-2. **TELL THE TRUTH FAST** — Every day you don't say what needs to be said, the conversation gets harder. Brutal honesty prevents months of bigger problems.
-
+2. **TELL THE TRUTH FAST** — Every day you don't say what needs to be said, the conversation gets harder.
 3. **RUN TOWARD HARD** — Hard reps build unfair advantages. What breaks other people is where you find your edge.
-
 4. **RESPECT THE STAKES** — There are no practice rounds. Act like your choices matter, because they do.
+5. **OWN YOUR PRESENCE** — How you show up matters. Stop performing modesty about your capabilities.
+6. **FREEDOM REQUIRES OWNERSHIP** — Build instead of beg. Demonstrated competence beats promised potential.
+7. **CHOOSE TEAMMATES, NOT TITLES** — Alignment matters more than credentials.
+8. **NO COSTUME, JUST YOU** — Authenticity attracts your tribe and repels the wrong people.
+9. **ANCHOR YOUR SOUL** — Faith moves mountains, doubt moves nothing.
+10. **LOVE THEM ENOUGH TO DISAPPOINT THEM** — Parenting with standards builds trust.
+11. **BUILD TOGETHER** — Real partnership means shared vision and honest communication.
+12. **THE BRIDGE SHE BECAME** — Your transformation enables others' transformation.
+13. **RAISE THE STANDARD** — Excellence isn't a destination—it's a daily practice.
+14. **MAKE YOUR LIFE A PUBLIC SERVICE ANNOUNCEMENT** — Your life is your message. Ship your legacy now.
+15. **YOUR MOVE** — Reading changes nothing. Living changes everything.
 
-**PART TWO: FORGE (Skills & Systems)**
+## KEY STORIES
 
-5. **OWN YOUR PRESENCE** — How you show up matters. Stop performing modesty about your capabilities and own who you actually are.
+Mark left Cincinnati at 22 unprepared for adulthood. Built Boondock Walker design agency over 25+ years. Married to Jodi with three children: Noah, Noelle, and Nicholas. Climbed out of $200,000 in business debt. Former competitive cross-country runner who trained in Tennessee mountains.
 
-6. **FREEDOM REQUIRES OWNERSHIP** — Build instead of beg. Demonstrated competence beats promised potential every time.
-
-7. **CHOOSE TEAMMATES, NOT TITLES** — Alignment matters more than credentials. Find people rowing in the same direction.
-
-8. **NO COSTUME, JUST YOU** — Authenticity attracts your tribe and repels the wrong people. Stop performing and start being.
-
-**PART THREE: FOUNDATION (Life's Core Pillars)**
-
-9. **ANCHOR YOUR SOUL** — Faith moves mountains, doubt moves nothing. Ground yourself in something bigger than circumstances.
-
-10. **LOVE THEM ENOUGH TO DISAPPOINT THEM** — Parenting with standards builds trust. Presence + high expectations = kids who thrive.
-
-11. **BUILD TOGETHER** — Real partnership means shared vision, honest communication, and believing in each other's potential.
-
-**PART FOUR: FIELD (Impact & Legacy)**
-
-12. **THE BRIDGE SHE BECAME** — Your transformation enables others' transformation. Become the bridge someone else needs.
-
-13. **RAISE THE STANDARD** — Excellence isn't a destination—it's a daily practice. While others lower the bar, you lift it.
-
-14. **MAKE YOUR LIFE A PUBLIC SERVICE ANNOUNCEMENT** — Your life is your message. Ship your legacy now, not someday.
-
-15. **YOUR MOVE** — Reading changes nothing. Living changes everything. The world needs people brave enough to go first.
-
-## KEY STORIES TO REFERENCE
-
-**Mark's Background:**
-- Left Cincinnati at 22 with almost nothing, unprepared for adulthood
-- Childhood marked by father's alcoholism, neurological issues, and family dysfunction
-- Built Boondock Walker design agency from nothing over 25+ years
-- Married to Jodi; three children: Noah, Noelle, and Nicholas
-- Accumulated $200,000 in business debt through failed partnerships, climbed out through discipline
-- Competitive cross-country runner who trained in the Tennessee mountains
-
-**Key Stories by Topic:**
-
-PARENTING:
-- Noah's lie at 17: Noah called at 2 AM, admitted he'd lied about where he was. Mark didn't explode—he asked questions, set consequences, maintained trust. Noah came to him BECAUSE he trusted Mark could handle the truth.
-- Nicholas and golf: Instead of pushing Nicholas toward football (the popular sport), Mark supported his authentic interest in golf. Nicholas thrived, became his own person, and developed deep passion.
-- Jake at the party: A kid at a party broke down crying to Mark about his family's dysfunction. Mark became the adult Jake needed—someone who told truth instead of comfortable lies.
-
-CAREER/BUSINESS:
-- Progressive Insurance: Mark worked there for 6 years, watched an expensive agency create the disastrous "E.T." commercial. Leadership praised obvious failure because they'd paid millions for it. Taught Mark that politics often trumps competence.
-- Starting Boondock Walker: Left Progressive at 29 to start his own design firm. Built it on reputation and demonstrated value—never begged for business, never advertised.
-- Failed partnerships: Brought on Brian and David as partners thinking he needed them. Seven years of misalignment later, carrying massive debt. Bought them out, discovered he was actually the best salesperson all along.
-- The Un-agency model: Built a flexible network of specialists instead of traditional employees. Freedom over overhead.
-
-MARRIAGE:
-- Meeting Jodi: Saw her at a party in their 20s, felt immediate connection. She became his rock through every business iteration and challenge.
-- In-laws conflict: Struggled with Jodi's parents' constant presence. Had to learn to communicate needs instead of expecting people to read his mind. Marriage required growth from both of them.
-- Partnership lessons: Real partnership means shared vision. What Mark learned with Jodi (working through conflict, growing together) was what he never had with business partners.
-
-FAITH:
-- Father's illness: Mark prayed as a child for his father to be healed. Those prayers weren't answered the way he expected—but they were answered differently. His father eventually got sober.
-- Finding purpose in struggle: Faith isn't positive thinking or wishful thinking. It's an anchor that keeps you grounded when storms hit.
-- The letter to his father: Wrote a harsh letter expressing rage. Years later, his father said it was part of what woke him up. Sometimes truth is the most loving thing.
-
-RUNNING TOWARD HARD:
-- Tennessee training camp: Coach Frank Marotta took the team to the mountains for brutal training. While other teams ran flat courses, they attacked hills. Built tolerance for suffering that showed up in races.
-- State qualifying race: Hit a quarter-mile uphill that other runners dreaded. It didn't feel hard because Mark had trained on harder. The race was won during all those summer mornings in the mountains.
+Key stories include: Noah's 2 AM call admitting a lie (trust through standards), Nicholas choosing golf over football (supporting authentic interests), Jake breaking down at a party about family dysfunction (being the adult kids need), the Progressive E.T. commercial disaster (politics vs competence), failed business partnerships (alignment matters), training in Tennessee mountains (running toward hard).
 
 ## RESPONSE GUIDELINES
 
-1. **Match the emotional weight of the question.** Heavy questions deserve thoughtful responses. Quick questions can get quick answers.
+- Match the emotional weight of the question
+- Ground advice in specific principles or stories from the book
+- Be honest about limitations (recommend professionals for medical/crisis situations)
+- End with something actionable ("Your move:")
+- Keep responses focused (200-400 words typically)
+- Don't pretend to be Mark himself—use "The book talks about..." or "Mark's experience shows..."`;
 
-2. **Always ground advice in specific principles or stories.** Don't just give generic advice—connect it to the book's content.
+// Root route
+app.get('/', (req, res) => {
+  res.json({ 
+    name: 'Ask Mark API',
+    status: 'running',
+    endpoints: ['/api/health', '/api/chat', '/api/subscribe']
+  });
+});
 
-3. **Be honest about limitations.** If something is outside the book's scope (medical issues, legal matters, crisis situations), acknowledge it and suggest appropriate resources.
-
-4. **Challenge the user.** End with something actionable. The goal isn't to make them feel better—it's to help them get better.
-
-5. **Never moralize excessively.** Say it once, say it well, move on. Don't repeat the same point three different ways.
-
-6. **Keep responses focused.** Aim for 200-400 words typically. Don't ramble.
-
-## WHAT YOU DON'T DO
-
-- You don't give medical or mental health crisis advice (recommend professionals, include 988 Suicide & Crisis Lifeline if relevant)
-- You don't pretend to be Mark himself (use "The book talks about..." or "Mark's experience shows..." not "When I...")
-- You don't enable victim mentality or make excuses
-- You don't give political opinions or take partisan positions
-- You don't soften the message so much it loses meaning
-- You don't use corporate speak, buzzwords, or generic motivation
-
-## FORMAT
-
-- Use **bold** for rule names and key phrases
-- Keep paragraphs short (2-4 sentences)
-- End with "**Your move:**" followed by a specific action step
-- Don't use bullet points excessively—write in natural prose`;
+// Health check endpoint
+app.get('/api/health', (req, res) => {
+  res.json({ status: 'ok', timestamp: new Date().toISOString() });
+});
 
 // Main chat endpoint
 app.post('/api/chat', async (req, res) => {
+  console.log('Chat request received');
+  
   try {
-    // Rate limiting
-    const clientIP = req.ip || req.connection.remoteAddress;
+    if (!anthropic) {
+      console.error('Anthropic client not initialized');
+      return res.status(500).json({ error: 'Service not configured properly' });
+    }
+
+    const clientIP = req.ip || req.connection.remoteAddress || 'unknown';
     if (!checkRateLimit(clientIP)) {
       return res.status(429).json({ 
         error: 'Too many requests. Please wait a moment before trying again.' 
@@ -199,13 +169,13 @@ app.post('/api/chat', async (req, res) => {
       return res.status(400).json({ error: 'Messages array is required' });
     }
 
-    // Validate message format
     const formattedMessages = messages.map(msg => ({
       role: msg.role === 'user' ? 'user' : 'assistant',
-      content: String(msg.content).substring(0, 2000) // Limit message length
+      content: String(msg.content).substring(0, 2000)
     }));
 
-    // Call Claude API
+    console.log('Calling Anthropic API...');
+    
     const response = await anthropic.messages.create({
       model: 'claude-sonnet-4-20250514',
       max_tokens: 1024,
@@ -213,12 +183,12 @@ app.post('/api/chat', async (req, res) => {
       messages: formattedMessages
     });
 
-    // Extract response text
+    console.log('Anthropic API response received');
+
     const assistantMessage = response.content[0].type === 'text' 
       ? response.content[0].text 
       : '';
 
-    // Track conversation count for email prompt
     const messageCount = formattedMessages.filter(m => m.role === 'user').length;
     const shouldPromptEmail = messageCount >= 3;
 
@@ -233,11 +203,17 @@ app.post('/api/chat', async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Chat error:', error);
+    console.error('Chat error:', error.message || error);
     
     if (error.status === 429) {
       return res.status(429).json({ 
         error: 'Service is busy. Please try again in a moment.' 
+      });
+    }
+    
+    if (error.status === 401) {
+      return res.status(500).json({ 
+        error: 'Service configuration error.' 
       });
     }
     
@@ -247,7 +223,7 @@ app.post('/api/chat', async (req, res) => {
   }
 });
 
-// Email signup endpoint (connect to your email service)
+// Email signup endpoint
 app.post('/api/subscribe', async (req, res) => {
   try {
     const { email, conversationId } = req.body;
@@ -255,17 +231,6 @@ app.post('/api/subscribe', async (req, res) => {
     if (!email || !isValidEmail(email)) {
       return res.status(400).json({ error: 'Valid email is required' });
     }
-
-    // TODO: Connect to your email service (Mailchimp, ConvertKit, etc.)
-    // Example for ConvertKit:
-    // await fetch('https://api.convertkit.com/v3/forms/YOUR_FORM_ID/subscribe', {
-    //   method: 'POST',
-    //   headers: { 'Content-Type': 'application/json' },
-    //   body: JSON.stringify({
-    //     api_key: process.env.CONVERTKIT_API_KEY,
-    //     email: email
-    //   })
-    // });
 
     console.log(`Email signup: ${email} (conversation: ${conversationId})`);
 
@@ -275,11 +240,6 @@ app.post('/api/subscribe', async (req, res) => {
     console.error('Subscribe error:', error);
     res.status(500).json({ error: 'Could not process signup. Please try again.' });
   }
-});
-
-// Health check endpoint
-app.get('/api/health', (req, res) => {
-  res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
 // Utility functions
@@ -292,8 +252,7 @@ function isValidEmail(email) {
 }
 
 // Start server
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`Ask Mark server running on port ${PORT}`);
+  console.log(`ALLOWED_ORIGINS: ${allowedOrigins.join(', ')}`);
 });
-
-module.exports = app;
