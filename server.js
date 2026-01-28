@@ -7,6 +7,7 @@
 const express = require('express');
 const cors = require('cors');
 const Anthropic = require('@anthropic-ai/sdk');
+const { Resend } = require('resend');
 
 const app = express();
 const PORT = process.env.PORT || 3001;
@@ -22,6 +23,15 @@ try {
   console.error('Failed to initialize Anthropic client:', err.message);
 }
 
+// Initialize Resend client
+let resend;
+if (process.env.RESEND_API_KEY) {
+  resend = new Resend(process.env.RESEND_API_KEY);
+  console.log('Resend email client initialized');
+} else {
+  console.log('Email not configured - RESEND_API_KEY missing');
+}
+
 // Middleware
 app.use(express.json());
 
@@ -32,14 +42,13 @@ const allowedOrigins = process.env.ALLOWED_ORIGINS
 
 app.use(cors({
   origin: function(origin, callback) {
-    // Allow requests with no origin (like mobile apps or curl requests)
     if (!origin) return callback(null, true);
     
     if (allowedOrigins.indexOf(origin) !== -1) {
       callback(null, true);
     } else {
       console.log('CORS blocked origin:', origin);
-      callback(null, true); // Allow anyway for debugging
+      callback(null, true);
     }
   },
   methods: ['POST', 'GET', 'OPTIONS'],
@@ -47,10 +56,9 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
-// Handle preflight requests
 app.options('*', cors());
 
-// Rate limiting (simple in-memory)
+// Rate limiting
 const rateLimitMap = new Map();
 const RATE_LIMIT_WINDOW = 60000;
 const RATE_LIMIT_MAX = 10;
@@ -173,7 +181,7 @@ app.get('/', (req, res) => {
   res.json({ 
     name: 'Ask Mark API',
     status: 'running',
-    endpoints: ['/api/health', '/api/chat', '/api/subscribe']
+    endpoints: ['/api/health', '/api/chat', '/api/subscribe', '/api/send-transcript']
   });
 });
 
@@ -262,19 +270,135 @@ app.post('/api/chat', async (req, res) => {
 // Email signup endpoint
 app.post('/api/subscribe', async (req, res) => {
   try {
-    const { email, conversationId } = req.body;
+    const { email, conversationId, name } = req.body;
 
     if (!email || !isValidEmail(email)) {
       return res.status(400).json({ error: 'Valid email is required' });
     }
 
-    console.log(`Email signup: ${email} (conversation: ${conversationId})`);
+    console.log(`Email signup: ${email} (name: ${name}, conversation: ${conversationId})`);
 
     res.json({ success: true, message: 'Thanks for signing up!' });
 
   } catch (error) {
     console.error('Subscribe error:', error);
     res.status(500).json({ error: 'Could not process signup. Please try again.' });
+  }
+});
+
+// Send transcript endpoint
+app.post('/api/send-transcript', async (req, res) => {
+  try {
+    const { email, name, messages, conversationId } = req.body;
+
+    if (!email || !isValidEmail(email)) {
+      return res.status(400).json({ error: 'Valid email is required' });
+    }
+
+    if (!messages || !Array.isArray(messages) || messages.length === 0) {
+      return res.status(400).json({ error: 'No conversation to send' });
+    }
+
+    if (!resend) {
+      console.error('Email not configured');
+      return res.status(500).json({ error: 'Email service not configured' });
+    }
+
+    // Format the transcript
+    const timestamp = new Date().toLocaleString('en-US', { 
+      dateStyle: 'full', 
+      timeStyle: 'short' 
+    });
+
+    const transcriptText = messages.map(msg => {
+      const sender = msg.role === 'user' ? (name || 'You') : 'Mark';
+      // Remove the [User's name is X] prefix from display
+      const content = msg.content.replace(/^\[User's name is [^\]]+\]\s*/, '');
+      return `${sender}:\n${content}`;
+    }).join('\n\n---\n\n');
+
+    const transcriptHtml = messages.map(msg => {
+      const sender = msg.role === 'user' ? (name || 'You') : 'Mark';
+      const content = msg.content.replace(/^\[User's name is [^\]]+\]\s*/, '');
+      const bgColor = msg.role === 'user' ? '#1a1a1a' : '#f2f2f2';
+      const textColor = msg.role === 'user' ? '#ffffff' : '#1a1a1a';
+      return `
+        <div style="margin-bottom: 16px;">
+          <strong style="color: #666;">${sender}</strong>
+          <div style="background-color: ${bgColor}; color: ${textColor}; padding: 14px 18px; border-radius: 12px; margin-top: 6px; line-height: 1.6;">
+            ${content.replace(/\n/g, '<br>').replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')}
+          </div>
+        </div>
+      `;
+    }).join('');
+
+    // Email to user
+    const userEmailHtml = `
+      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto;">
+        <div style="background-color: #e63946; padding: 24px; text-align: center;">
+          <h1 style="color: white; margin: 0; font-size: 24px;">Your Ask Mark Conversation</h1>
+        </div>
+        <div style="padding: 24px; background-color: #ffffff;">
+          <p style="color: #666; font-size: 14px; margin-bottom: 24px;">
+            Here's your conversation from ${timestamp}
+          </p>
+          ${transcriptHtml}
+          <hr style="border: none; border-top: 1px solid #eee; margin: 32px 0;">
+          <p style="color: #666; font-size: 14px; text-align: center;">
+            Want more? <em>Brave & Boundless</em> is coming soon.<br>
+            <a href="https://braveandboundless.com" style="color: #e63946;">braveandboundless.com</a>
+          </p>
+        </div>
+      </div>
+    `;
+
+    // Email to Mark (notification)
+    const notificationHtml = `
+      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 600px; margin: 0 auto;">
+        <div style="background-color: #1a1a1a; padding: 24px;">
+          <h1 style="color: white; margin: 0; font-size: 20px;">New Ask Mark Conversation</h1>
+        </div>
+        <div style="padding: 24px; background-color: #ffffff;">
+          <p style="color: #666; font-size: 14px; margin-bottom: 8px;">
+            <strong>From:</strong> ${name || 'Anonymous'} (${email})
+          </p>
+          <p style="color: #666; font-size: 14px; margin-bottom: 8px;">
+            <strong>Time:</strong> ${timestamp}
+          </p>
+          <p style="color: #666; font-size: 14px; margin-bottom: 24px;">
+            <strong>Conversation ID:</strong> ${conversationId || 'N/A'}
+          </p>
+          <hr style="border: none; border-top: 1px solid #eee; margin: 16px 0;">
+          ${transcriptHtml}
+        </div>
+      </div>
+    `;
+
+    // Send to user
+    await resend.emails.send({
+      from: 'Ask Mark <askmark@braveandboundless.com>',
+      to: email,
+      subject: 'Your Ask Mark Conversation',
+      html: userEmailHtml,
+      text: `Your Ask Mark Conversation\n\n${timestamp}\n\n${transcriptText}\n\n---\nWant more? Brave & Boundless is coming soon.\nhttps://braveandboundless.com`
+    });
+
+    // Send notification to Mark
+    await resend.emails.send({
+      from: 'Ask Mark Bot <askmark@braveandboundless.com>',
+      to: 'mark@braveandboundless.com',
+      subject: `Ask Mark Chat: ${name || 'Anonymous'} - ${new Date().toLocaleDateString()}`,
+      html: notificationHtml,
+      text: `New Ask Mark Conversation\n\nFrom: ${name || 'Anonymous'} (${email})\nTime: ${timestamp}\n\n${transcriptText}`
+    });
+
+    console.log(`Transcript sent to ${email} and notification sent to Mark`);
+
+    res.json({ success: true, message: 'Conversation sent!' });
+
+  } catch (error) {
+    console.error('Send transcript error:', error);
+    res.status(500).json({ error: 'Could not send email. Please try again.' });
   }
 });
 
